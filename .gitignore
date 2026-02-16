@@ -1,0 +1,26 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Uploads
+uploads/
+uploads/movimientos/
+uploads/movimientos/*
+
+# Database
+*.db
+*.sqlite3
+
+# Environment variables
+.env
+.env.local
