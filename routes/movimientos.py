@@ -140,3 +140,46 @@ def resumen_movimientos():
         'balance_estimado': entradas_hoy - salidas_hoy,
     }), 200
 
+@movimientos_bp.route('/movimientos/persona', methods=['POST'])
+def movimientos_por_persona():
+    """
+    Endpoint POST para obtener todos los movimientos de una persona por su cédula
+    """
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'Se esperaba un JSON en el body'}), 400
+
+    cedula = data.get('cedula', '').strip()
+
+    # Validar que la cédula sea proporcionada
+    if not cedula:
+        return jsonify({'error': 'La cédula es requerida'}), 400
+
+    # Buscar la persona
+    persona = Persona.query.filter_by(cedula=cedula, activo=True).first()
+    if not persona:
+        return jsonify({'error': f"No se encontró persona activa con cédula '{cedula}'"}), 404
+
+    # Obtener todos los movimientos de la persona (entradas y salidas)
+    movimientos = Movimiento.query.filter_by(cedula=cedula)\
+                                 .order_by(Movimiento.fecha_hora.desc())\
+                                 .all()
+
+    # Preparar respuesta
+    return jsonify({
+        'success': True,
+        'mensaje': f'Movimientos encontrados para {persona.nombre}',
+        'persona': {
+            'cedula': persona.cedula,
+            'nombre': persona.nombre,
+            'imagen_path': persona.imagen_path,
+            'activo': persona.activo
+        },
+        'movimientos': [m.to_dict() for m in movimientos],
+        'total_movimientos': len(movimientos),
+        'resumen': {
+            'entradas': sum(1 for m in movimientos if m.tipo == 'entrada'),
+            'salidas': sum(1 for m in movimientos if m.tipo == 'salida')
+        }
+    }), 200
