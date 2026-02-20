@@ -7,6 +7,7 @@ from models import db
 from routes.personas import personas_bp
 from routes.verificacion import verificacion_bp
 from routes.movimientos import movimientos_bp
+from routes.auth import auth_bp
 
 
 def create_app(config_class=Config):
@@ -21,6 +22,7 @@ def create_app(config_class=Config):
     app.register_blueprint(personas_bp)
     app.register_blueprint(verificacion_bp)
     app.register_blueprint(movimientos_bp)
+    app.register_blueprint(auth_bp)
 
     # Crear tablas y carpetas necesarias
     with app.app_context():
