@@ -143,26 +143,48 @@ def resumen_movimientos():
 @movimientos_bp.route('/movimientos/persona', methods=['POST'])
 def movimientos_por_persona():
     """
-    Endpoint POST para obtener todos los movimientos de una persona por su cédula
+    Endpoint POST para obtener todos los movimientos de una persona por su cédula o nombre
+    Acepta form-data con key 'cedula' o 'nombre'
     """
-    data = request.get_json()
+    # Obtener datos del form-data en lugar de JSON
+    cedula = request.form.get('cedula', '').strip()
+    nombre = request.form.get('nombre', '').strip()
 
-    if not data:
-        return jsonify({'error': 'Se esperaba un JSON en el body'}), 400
+    # Validar que al menos uno de los dos campos sea proporcionado
+    if not cedula and not nombre:
+        return jsonify({'error': 'Se requiere cédula o nombre en el form-data'}), 400
 
-    cedula = data.get('cedula', '').strip()
+    # Buscar la persona según el criterio proporcionado
+    persona = None
+    query = Persona.query.filter_by(activo=True)
 
-    # Validar que la cédula sea proporcionada
-    if not cedula:
-        return jsonify({'error': 'La cédula es requerida'}), 400
+    if cedula:
+        persona = query.filter_by(cedula=cedula).first()
+        if not persona:
+            return jsonify({'error': f"No se encontró persona activa con cédula '{cedula}'"}), 404
+    elif nombre:
+        # Búsqueda flexible por nombre (puede contener parte del nombre)
+        personas = query.filter(Persona.nombre.ilike(f'%{nombre}%')).all()
 
-    # Buscar la persona
-    persona = Persona.query.filter_by(cedula=cedula, activo=True).first()
-    if not persona:
-        return jsonify({'error': f"No se encontró persona activa con cédula '{cedula}'"}), 404
+        if not personas:
+            return jsonify({'error': f"No se encontraron personas activas con nombre que contenga '{nombre}'"}), 404
+        elif len(personas) > 1:
+            # Si hay múltiples coincidencias, devolver lista de opciones
+            return jsonify({
+                'success': False,
+                'multiple_results': True,
+                'mensaje': f'Se encontraron {len(personas)} personas con ese nombre',
+                'personas': [{
+                    'cedula': p.cedula,
+                    'nombre': p.nombre,
+                    'imagen_path': p.imagen_path
+                } for p in personas]
+            }), 300  # Código 300 para múltiples opciones
+
+        persona = personas[0]
 
     # Obtener todos los movimientos de la persona (entradas y salidas)
-    movimientos = Movimiento.query.filter_by(cedula=cedula)\
+    movimientos = Movimiento.query.filter_by(cedula=persona.cedula)\
                                  .order_by(Movimiento.fecha_hora.desc())\
                                  .all()
 
