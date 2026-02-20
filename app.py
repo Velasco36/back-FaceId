@@ -1,6 +1,5 @@
-
 import os
-from flask import Flask
+from flask import Flask, send_from_directory
 from flask_cors import CORS
 from config import Config
 from models import db
@@ -41,6 +40,14 @@ def create_app(config_class=Config):
     @app.route('/health', methods=['GET'])
     def health():
         return {"status": "ok", "mensaje": "API de Reconocimiento Facial activa"}
+
+    @app.route('/uploads/movimientos/<filename>')
+    def serve_movimiento_image(filename):
+        return send_from_directory(app.config['UPLOAD_FOLDER_MOVIMIENTOS'], filename)
+
+    @app.route('/uploads/registros/<filename>')
+    def serve_registro_image(filename):
+        return send_from_directory(app.config['UPLOAD_FOLDER_REGISTROS'], filename)
 
     return app
 

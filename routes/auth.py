@@ -80,7 +80,7 @@ def registro():
     if not data:
         return jsonify({'error': 'Se requieren datos'}), 400
 
-    username = data.get('username', '').strip()
+    username = data.get('username', '').strip().upper()  # 🔥 Convertir a mayúsculas
     password = data.get('password', '').strip()
     rol = data.get('rol', 'user').strip().lower()
 
@@ -102,8 +102,8 @@ def registro():
     if errores:
         return jsonify({'error': 'Datos inválidos', 'detalles': errores}), 400
 
-    # Verificar que el username no exista
-    if Usuario.query.filter_by(username=username).first():
+    # Verificar que el username no exista (búsqueda case-insensitive)
+    if Usuario.query.filter(Usuario.username.ilike(username)).first():  # 🔥 Buscar sin importar mayúsculas/minúsculas
         return jsonify({'error': f"El username '{username}' ya está en uso"}), 409
 
     usuario = Usuario(username=username, rol=rol)
@@ -120,6 +120,31 @@ def registro():
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
+    data = obtener_datos_request()
+    if not data:
+        return jsonify({'error': 'Se requieren datos'}), 400
+
+    username = data.get('username', '').strip().upper()  
+    password = data.get('password', '').strip()
+
+    if not username or not password:
+        return jsonify({'error': 'Username y contraseña son requeridos'}), 400
+
+    # Buscar usuario con case-insensitive
+    usuario = Usuario.query.filter(Usuario.username.ilike(username), Usuario.activo == True).first()
+
+    if not usuario or not usuario.check_password(password):
+        return jsonify({'error': 'Credenciales inválidas'}), 401
+
+    # Generar token
+    token = generar_token(usuario.id, usuario.username, usuario.rol)
+
+    return jsonify({
+        'success': True,
+        'mensaje': f'Bienvenido, {usuario.username}',
+        'token': token,
+        'usuario': usuario.to_dict()
+    }), 200
     data = obtener_datos_request()
     if not data:
         return jsonify({'error': 'Se requieren datos'}), 400

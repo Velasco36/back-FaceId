@@ -6,7 +6,6 @@ import json
 db = SQLAlchemy()
 
 
-# models.py - Agrega este modelo
 class TokenBlacklist(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     token = db.Column(db.String(500), unique=True, nullable=False)
@@ -15,13 +14,14 @@ class TokenBlacklist(db.Model):
     def __repr__(self):
         return f'<Token {self.id}>'
 
+
 class Usuario(db.Model):
     __tablename__ = 'usuarios'
 
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     username = db.Column(db.String(50), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
-    rol = db.Column(db.String(10), nullable=False, default='user')  # 'user' o 'admin'
+    rol = db.Column(db.String(10), nullable=False, default='user')
     activo = db.Column(db.Boolean, default=True, nullable=False)
     fecha_creacion = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     fecha_actualizacion = db.Column(db.DateTime, default=datetime.utcnow,
@@ -75,11 +75,19 @@ class Persona(db.Model):
         return None
 
     def to_dict(self, include_encoding=False):
+        from flask import request
+        base_url = request.host_url.rstrip('/')
+
+        imagen_url = None
+        if self.imagen_path:
+            imagen_url = f"{base_url}/uploads/registros/{self.imagen_path}"
+
         data = {
             'id': self.id,
             'cedula': self.cedula,
             'nombre': self.nombre,
             'imagen_path': self.imagen_path,
+            'imagen_url': imagen_url,
             'activo': self.activo,
             'tiene_encoding': self.encoding_facial is not None,
             'fecha_registro': self.fecha_registro.isoformat() if self.fecha_registro else None,
@@ -104,16 +112,24 @@ class Movimiento(db.Model):
     fecha_hora = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
     confianza_verificacion = db.Column(db.Float, nullable=True)
 
-    def to_dict(self):
+    def to_dict(self):                          # ← ahora SÍ está dentro de la clase
+        from flask import request
+        base_url = request.host_url.rstrip('/')
+
+        imagen_url = None
+        if self.imagen_path:
+            imagen_url = f"{base_url}/uploads/movimientos/{self.imagen_path}"
+
         return {
             'id': self.id,
             'cedula': self.cedula,
             'nombre_persona': self.persona.nombre if self.persona else None,
             'tipo': self.tipo,
-            'imagen_path': self.imagen_path,
             'observacion': self.observacion,
+            'fecha_hora': self.fecha_hora.isoformat(),
+            'imagen_path': self.imagen_path,
+            'imagen_url': imagen_url,
             'confianza_verificacion': self.confianza_verificacion,
-            'fecha_hora': self.fecha_hora.isoformat() if self.fecha_hora else None,
         }
 
     def __repr__(self):
