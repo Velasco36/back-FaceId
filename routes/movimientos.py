@@ -1,9 +1,8 @@
-
 import os
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
 from models import db, Persona, Movimiento
-from utils.helpers import guardar_imagen, paginar_query, parsear_fecha
+from utils.helpers import paginar_query, parsear_fecha
 
 movimientos_bp = Blueprint('movimientos', __name__)
 
@@ -31,19 +30,10 @@ def registrar_movimiento():
     if not persona:
         return jsonify({'error': f"No se encontro persona activa con cedula '{cedula}'"}), 404
 
-    nombre_imagen = None
-    if 'imagen' in request.files and request.files['imagen'].filename != '':
-        archivo = request.files['imagen']
-        carpeta = current_app.config['UPLOAD_FOLDER_MOVIMIENTOS']
-        try:
-            nombre_imagen = guardar_imagen(archivo, carpeta, prefijo=f'mov_{cedula}_{tipo}')
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 400
-
+    # Eliminada completamente la lógica de imagen
     movimiento = Movimiento(
         cedula=cedula,
         tipo=tipo,
-        imagen_path=nombre_imagen,
         observacion=observacion,
         fecha_hora=datetime.utcnow()
     )
