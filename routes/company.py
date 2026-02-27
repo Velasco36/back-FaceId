@@ -1,454 +1,193 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-from datetime import datetime
-from models import db, Empresa, Usuario
-import logging
-
-# Configurar logging
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
+from flask_jwt_extended import jwt_required
+from models import db, Empresa, Usuario, Sucursal
+from functools import wraps
+from routes.auth import get_contexto_actual
 
 empresa_bp = Blueprint('empresa', __name__)
 
-def get_request_data():
-    """
-    Función auxiliar para obtener datos del request en cualquier formato
-    Soporta: JSON, form-data, x-www-form-urlencoded
-    """
-    try:
-        # Si es JSON
-        if request.is_json:
-            logger.debug("Datos recibidos como JSON")
-            return request.get_json()
 
-        # Si es form-data o x-www-form-urlencoded
-        logger.debug("Datos recibidos como form-data")
-        data = {}
+# ─────────────────────────────────────────────
+# DECORATOR — solo admin_empresa
+# ─────────────────────────────────────────────
+def solo_admin_empresa(f):
+    @wraps(f)
+    @jwt_required()
+    def decorated(*args, **kwargs):
+        ctx = get_contexto_actual()
+        if ctx['rol'] not in ('admin_empresa', 'super_admin'):
+            return jsonify({'error': 'Acceso denegado. Se requiere rol admin_empresa'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
-        # Obtener datos del form
-        for key in request.form.keys():
-            data[key] = request.form.get(key)
 
-        # Obtener archivos si existen
-        files = {}
-        for key in request.files.keys():
-            files[key] = request.files.get(key)
-
-        if files:
-            data['_files'] = files
-
-        logger.debug(f"Datos procesados: {data}")
-        return data
-
-    except Exception as e:
-        logger.error(f"Error procesando request data: {str(e)}")
-        return {}
-
-# Crear una nueva empresa (PÚBLICO - no requiere autenticación)
+# ─────────────────────────────────────────────
+# REGISTRAR empresa — público, no requiere token
+# ─────────────────────────────────────────────
 @empresa_bp.route('/empresas', methods=['POST'])
-def crear_empresa():
-    """
-    Endpoint público para crear una nueva empresa
-    No requiere autenticación ni token JWT
-    """
-    try:
-        # Obtener datos del request
-        data = get_request_data()
+def registrar_empresa():
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Se requiere JSON en el body'}), 400
 
-        # Log para debug
-        logger.info(f"Creando empresa con datos: {data}")
-        logger.info(f"Content-Type: {request.content_type}")
+    campos = ['nombre', 'rif', 'password']
+    if not all(data.get(c) for c in campos):
+        return jsonify({'error': f'Campos requeridos: {", ".join(campos)}'}), 400
 
-        # Validar campos requeridos
-        nombre = data.get('nombre')
-        rif = data.get('rif')
-        password = data.get('password')
+    if Empresa.query.filter_by(rif=data['rif']).first():
+        return jsonify({'error': 'Ya existe una empresa con ese RIF'}), 409
 
-        if not nombre or not rif or not password:
-            return jsonify({
-                'error': 'Nombre, RIF y password son requeridos',
-                'received': {
-                    'nombre': nombre,
-                    'rif': rif,
-                    'password': '***' if password else None
-                }
-            }), 400
+    empresa = Empresa(nombre=data['nombre'], rif=data['rif'])
+    empresa.set_password(data['password'])
+    db.session.add(empresa)
+    db.session.flush()
 
-        # Validar longitud de password
-        if len(password) < 6:
-            return jsonify({
-                'error': 'La contraseña debe tener al menos 6 caracteres'
-            }), 400
+    # Sede Principal automática
+    sede = Sucursal(
+        nombre='Sede Principal',
+        empresa_id=empresa.id,
+        es_matriz=True
+    )
+    db.session.add(sede)
+    db.session.flush()
 
-        # Verificar si ya existe una empresa con el mismo RIF
-        empresa_existente = Empresa.query.filter_by(rif=rif).first()
-        if empresa_existente:
-            return jsonify({
-                'error': 'Ya existe una empresa con este RIF',
-                'rif': rif
-            }), 400
+    # Usuario admin_empresa automático
+    admin = Usuario(
+        username=data.get('admin_username', data['rif']),
+        rol='admin_empresa',
+        empresa_id=empresa.id,
+        sucursal_id=sede.id
+    )
+    admin.set_password(data['password'])
+    db.session.add(admin)
+    db.session.commit()
 
-        # Crear nueva empresa
-        nueva_empresa = Empresa(
-            nombre=nombre,
-            rif=rif
-        )
-        nueva_empresa.set_password(password)
+    return jsonify({
+        'mensaje': 'Empresa registrada exitosamente',
+        'empresa': empresa.to_dict(),
+        'sede_principal': sede.to_dict(),
+        'admin_username': admin.username,
+        'credenciales': {
+            'username': admin.username,
+            'password': '(la que ingresaste)',
+            'nota': 'Guarda estas credenciales, no se volverán a mostrar'
+        }
+    }), 201
 
-        # Guardar en base de datos
-        db.session.add(nueva_empresa)
-        db.session.commit()
 
-        logger.info(f"Empresa creada exitosamente: ID {nueva_empresa.id}")
+# ─────────────────────────────────────────────
+# OBTENER empresa
+# ─────────────────────────────────────────────
+@empresa_bp.route('/empresas/<int:empresa_id>', methods=['GET'])
+@solo_admin_empresa
+def obtener_empresa(empresa_id):
+    ctx = get_contexto_actual()
 
-        # Crear automáticamente un usuario admin para esta empresa
-        from models import Usuario
-        admin_username = f"admin_{rif.lower().replace('-', '_')}"
-        admin_usuario = Usuario(
-            username=admin_username,
-            rol="admin_empresa",
-            empresa_id=nueva_empresa.id,
-            activo=True
-        )
-        admin_usuario.set_password(password)  # Misma contraseña que la empresa
+    # Solo puede ver su propia empresa
+    if ctx['empresa_id'] != empresa_id and ctx['rol'] != 'super_admin':
+        return jsonify({'error': 'No tienes acceso a esta empresa'}), 403
 
-        db.session.add(admin_usuario)
-        db.session.commit()
+    empresa = Empresa.query.get_or_404(empresa_id)
+    return jsonify({'empresa': empresa.to_dict()}), 200
 
-        logger.info(f"Usuario admin creado para empresa: {admin_username}")
 
-        return jsonify({
-            'mensaje': 'Empresa creada exitosamente',
-            'empresa': nueva_empresa.to_dict(),
-            'usuario_admin': {
-                'username': admin_username,
-                'mensaje': 'Usuario administrador creado automáticamente'
-            }
-        }), 201
+# ─────────────────────────────────────────────
+# ACTUALIZAR empresa
+# ─────────────────────────────────────────────
+@empresa_bp.route('/empresas/<int:empresa_id>', methods=['PUT'])
+@solo_admin_empresa
+def actualizar_empresa(empresa_id):
+    ctx = get_contexto_actual()
 
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error creando empresa: {str(e)}")
-        return jsonify({
-            'error': 'Error interno del servidor',
-            'detalle': str(e)
-        }), 500
+    if ctx['empresa_id'] != empresa_id and ctx['rol'] != 'super_admin':
+        return jsonify({'error': 'No tienes acceso a esta empresa'}), 403
 
-# Login para empresa (público)
-@empresa_bp.route('/empresas/login', methods=['POST'])
-def login_empresa():
-    """
-    Endpoint público para que las empresas inicien sesión
-    """
-    try:
-        data = get_request_data()
+    empresa = Empresa.query.get_or_404(empresa_id)
+    data    = request.get_json()
 
-        rif = data.get('rif')
-        password = data.get('password')
+    if not data:
+        return jsonify({'error': 'Se requiere JSON en el body'}), 400
 
-        if not rif or not password:
-            return jsonify({
-                'error': 'RIF y password son requeridos'
-            }), 400
+    if 'nombre' in data and data['nombre'].strip():
+        empresa.nombre = data['nombre'].strip()
 
-        # Buscar empresa
-        empresa = Empresa.query.filter_by(rif=rif).first()
+    if 'password' in data and data['password']:
+        empresa.set_password(data['password'])
 
-        if not empresa or not empresa.check_password(password):
-            return jsonify({
-                'error': 'Credenciales inválidas'
-            }), 401
+    db.session.commit()
 
-        if not empresa.activo:
-            return jsonify({
-                'error': 'Empresa inactiva'
-            }), 401
+    return jsonify({
+        'mensaje': 'Empresa actualizada',
+        'empresa': empresa.to_dict()
+    }), 200
 
-        from flask_jwt_extended import create_access_token
-        from datetime import timedelta
 
-        # Crear token para la empresa
-        access_token = create_access_token(
-            identity={
-                'id': empresa.id,
-                'tipo': 'empresa',
-                'nombre': empresa.nombre,
-                'rif': empresa.rif
-            },
-            expires_delta=timedelta(hours=1)
-        )
-
-        return jsonify({
-            'mensaje': 'Login exitoso',
-            'access_token': access_token,
-            'empresa': empresa.to_dict()
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error en login de empresa: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# Las siguientes rutas SÍ requieren autenticación
-
-# Obtener todas las empresas (requiere autenticación)
+# ─────────────────────────────────────────────
+# LISTAR empresas — solo super_admin
+# ─────────────────────────────────────────────
 @empresa_bp.route('/empresas', methods=['GET'])
 @jwt_required()
 def listar_empresas():
-    try:
-        # Obtener identidad del usuario actual
-        current_user = get_jwt_identity()
-        logger.info(f"Usuario {current_user.get('username', 'desconocido')} listando empresas")
+    ctx = get_contexto_actual()
 
-        # Obtener parámetros de consulta
-        pagina = request.args.get('pagina', 1, type=int)
-        por_pagina = request.args.get('por_pagina', 10, type=int)
-        solo_activas = request.args.get('solo_activas', 'true').lower() == 'true'
-        busqueda = request.args.get('busqueda', '')
+    if ctx['rol'] != 'super_admin':
+        return jsonify({'error': 'Acceso denegado'}), 403
 
-        # Construir query
-        query = Empresa.query
+    page     = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 10, type=int)
+    search   = request.args.get('search', '', type=str)
 
-        if solo_activas:
-            query = query.filter_by(activo=True)
+    query = Empresa.query
 
-        if busqueda:
-            query = query.filter(
-                (Empresa.nombre.ilike(f'%{busqueda}%')) |
-                (Empresa.rif.ilike(f'%{busqueda}%'))
+    if search:
+        query = query.filter(
+            db.or_(
+                Empresa.nombre.ilike(f'%{search}%'),
+                Empresa.rif.ilike(f'%{search}%')
             )
-
-        # Paginación
-        empresas = query.order_by(Empresa.nombre).paginate(
-            page=pagina,
-            per_page=por_pagina,
-            error_out=False
         )
 
-        return jsonify({
-            'empresas': [empresa.to_dict() for empresa in empresas.items],
-            'total': empresas.total,
-            'pagina': pagina,
-            'por_pagina': por_pagina,
-            'total_paginas': empresas.pages
-        }), 200
+    pagination = query.order_by(Empresa.nombre.asc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
 
-    except Exception as e:
-        logger.error(f"Error listando empresas: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# Obtener una empresa por ID (requiere autenticación)
-@empresa_bp.route('/empresas/<int:empresa_id>', methods=['GET'])
-@jwt_required()
-def obtener_empresa(empresa_id):
-    try:
-        empresa = Empresa.query.get_or_404(empresa_id)
-
-        # Verificar permisos (admin o usuario de la misma empresa)
-        current_user = get_jwt_identity()
-
-        # Si es un usuario normal (no empresa)
-        if 'id' in current_user and 'tipo' not in current_user:
-            from models import Usuario
-            usuario = Usuario.query.get(current_user['id'])
-            if not usuario.es_admin() and usuario.empresa_id != empresa.id:
-                return jsonify({'error': 'No tiene permisos para ver esta empresa'}), 403
-
-        return jsonify(empresa.to_dict()), 200
-
-    except Exception as e:
-        logger.error(f"Error obteniendo empresa {empresa_id}: {str(e)}")
-        return jsonify({'error': 'Empresa no encontrada'}), 404
-
-# Actualizar una empresa (requiere autenticación)
-@empresa_bp.route('/empresas/<int:empresa_id>', methods=['PUT'])
-@jwt_required()
-def actualizar_empresa(empresa_id):
-    try:
-        empresa = Empresa.query.get_or_404(empresa_id)
-        data = get_request_data()
-
-        # Verificar permisos
-        current_user = get_jwt_identity()
-
-        # Si es empresa autenticada como empresa
-        if 'tipo' in current_user and current_user['tipo'] == 'empresa':
-            if current_user['id'] != empresa.id:
-                return jsonify({'error': 'No tiene permisos para modificar esta empresa'}), 403
-        else:
-            # Si es usuario normal
-            from models import Usuario
-            usuario = Usuario.query.get(current_user['id'])
-            if not usuario.es_admin() and usuario.empresa_id != empresa.id:
-                return jsonify({'error': 'No tiene permisos para modificar esta empresa'}), 403
-
-        logger.info(f"Actualizando empresa {empresa_id} con datos: {data}")
-
-        # Actualizar campos
-        if data.get('nombre'):
-            empresa.nombre = data['nombre']
-
-        if data.get('rif') and data['rif'] != empresa.rif:
-            # Verificar que el nuevo RIF no exista
-            if Empresa.query.filter_by(rif=data['rif']).first():
-                return jsonify({'error': 'Ya existe una empresa con este RIF'}), 400
-            empresa.rif = data['rif']
-
-        if data.get('password'):
-            if len(data['password']) >= 6:
-                empresa.set_password(data['password'])
-            else:
-                return jsonify({'error': 'La contraseña debe tener al menos 6 caracteres'}), 400
-
-        if data.get('activo') is not None:
-            # Solo admins pueden activar/desactivar empresas
-            if 'tipo' in current_user and current_user['tipo'] == 'empresa':
-                return jsonify({'error': 'Las empresas no pueden cambiar su propio estado'}), 403
-
-            # Convertir string a boolean si viene de form-data
-            if isinstance(data['activo'], str):
-                empresa.activo = data['activo'].lower() == 'true'
-            else:
-                empresa.activo = data['activo']
-
-        empresa.fecha_actualizacion = datetime.utcnow()
-        db.session.commit()
-
-        logger.info(f"Empresa {empresa_id} actualizada exitosamente")
-
-        return jsonify({
-            'mensaje': 'Empresa actualizada exitosamente',
-            'empresa': empresa.to_dict()
-        }), 200
-
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error actualizando empresa {empresa_id}: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# Eliminar una empresa (soft delete - solo admin)
-@empresa_bp.route('/empresas/<int:empresa_id>', methods=['DELETE'])
-@jwt_required()
-def eliminar_empresa(empresa_id):
-    try:
-        empresa = Empresa.query.get_or_404(empresa_id)
-
-        # Verificar permisos (solo admin)
-        current_user = get_jwt_identity()
-        from models import Usuario
-        usuario = Usuario.query.get(current_user['id'])
-
-        if not usuario.es_admin():
-            return jsonify({'error': 'Se requieren permisos de administrador'}), 403
-
-        logger.info(f"Eliminando empresa {empresa_id}")
-
-        # Verificar si tiene sucursales activas
-        sucursales_activas = empresa.sucursales.filter_by(activo=True).count()
-        if sucursales_activas > 0:
-            return jsonify({
-                'error': 'No se puede eliminar la empresa porque tiene sucursales activas',
-                'sucursales_activas': sucursales_activas
-            }), 400
-
-        # Verificar si tiene usuarios activos
-        usuarios_activos = Usuario.query.filter_by(empresa_id=empresa_id, activo=True).count()
-        if usuarios_activos > 0:
-            return jsonify({
-                'error': 'No se puede eliminar la empresa porque tiene usuarios activos',
-                'usuarios_activos': usuarios_activos
-            }), 400
-
-        # Soft delete (desactivar)
-        empresa.activo = False
-        empresa.fecha_actualizacion = datetime.utcnow()
-        db.session.commit()
-
-        logger.info(f"Empresa {empresa_id} desactivada exitosamente")
-
-        return jsonify({
-            'mensaje': 'Empresa desactivada exitosamente'
-        }), 200
-
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error eliminando empresa {empresa_id}: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-# Obtener estadísticas de una empresa (requiere autenticación)
-@empresa_bp.route('/empresas/<int:empresa_id>/estadisticas', methods=['GET'])
-@jwt_required()
-def estadisticas_empresa(empresa_id):
-    try:
-        empresa = Empresa.query.get_or_404(empresa_id)
-
-        # Verificar permisos
-        current_user = get_jwt_identity()
-
-        # Si es empresa autenticada como empresa
-        if 'tipo' in current_user and current_user['tipo'] == 'empresa':
-            if current_user['id'] != empresa.id:
-                return jsonify({'error': 'No tiene permisos para ver estadísticas de esta empresa'}), 403
-        else:
-            # Si es usuario normal
-            from models import Usuario
-            usuario = Usuario.query.get(current_user['id'])
-            if not usuario.es_admin() and usuario.empresa_id != empresa.id:
-                return jsonify({'error': 'No tiene permisos para ver estadísticas de esta empresa'}), 403
-
-        from models import Sucursal, Usuario, Persona, Movimiento
-
-        # Obtener estadísticas
-        stats = {
-            'empresa_id': empresa.id,
-            'empresa_nombre': empresa.nombre,
-            'total_sucursales': empresa.sucursales.count(),
-            'sucursales_activas': empresa.sucursales.filter_by(activo=True).count(),
-            'total_usuarios': Usuario.query.filter_by(empresa_id=empresa_id).count(),
-            'usuarios_activos': Usuario.query.filter_by(empresa_id=empresa_id, activo=True).count(),
-            'total_personas': Persona.query.filter_by(empresa_id=empresa_id).count(),
-            'personas_activas': Persona.query.filter_by(empresa_id=empresa_id, activo=True).count(),
-            'total_movimientos': Movimiento.query.filter_by(empresa_id=empresa_id).count(),
-            'movimientos_hoy': Movimiento.query.filter(
-                Movimiento.empresa_id == empresa_id,
-                Movimiento.fecha_hora >= datetime.utcnow().date()
-            ).count()
+    return jsonify({
+        'empresas': [e.to_dict() for e in pagination.items],
+        'paginacion': {
+            'total':           pagination.total,
+            'paginas':         pagination.pages,
+            'pagina_actual':   page,
+            'por_pagina':      per_page,
+            'tiene_siguiente': pagination.has_next,
+            'tiene_anterior':  pagination.has_prev,
         }
+    }), 200
 
-        return jsonify(stats), 200
 
-    except Exception as e:
-        logger.error(f"Error obteniendo estadísticas de empresa {empresa_id}: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+# ─────────────────────────────────────────────
+# SUCURSALES POR RIF — público para el login
+# (Flutter necesita esto antes de tener token)
+# ─────────────────────────────────────────────
+@empresa_bp.route('/empresas/rif/<string:rif>/sucursales', methods=['GET'])
+def sucursales_por_rif(rif):
+    """
+    Endpoint público usado en el flujo de login:
+    Flutter busca la empresa por RIF y muestra sus sucursales
+    antes de que el usuario se autentique.
+    """
+    empresa = Empresa.query.filter_by(rif=rif, activo=True).first()
+    if not empresa:
+        return jsonify({'error': f'No se encontró ninguna empresa con RIF: {rif}'}), 404
 
-# Activar/Desactivar empresa (toggle - solo admin)
-@empresa_bp.route('/empresas/<int:empresa_id>/toggle', methods=['POST'])
-@jwt_required()
-def toggle_empresa(empresa_id):
-    try:
-        empresa = Empresa.query.get_or_404(empresa_id)
+    sucursales = Sucursal.query.filter_by(
+        empresa_id=empresa.id,
+        activo=True
+    ).order_by(Sucursal.es_matriz.desc(), Sucursal.nombre.asc()).all()
 
-        # Verificar permisos (solo admin)
-        current_user = get_jwt_identity()
-        from models import Usuario
-        usuario = Usuario.query.get(current_user['id'])
-
-        if not usuario.es_admin():
-            return jsonify({'error': 'Se requieren permisos de administrador'}), 403
-
-        # Cambiar estado
-        empresa.activo = not empresa.activo
-        empresa.fecha_actualizacion = datetime.utcnow()
-        db.session.commit()
-
-        estado = "activada" if empresa.activo else "desactivada"
-        logger.info(f"Empresa {empresa_id} {estado}")
-
-        return jsonify({
-            'mensaje': f'Empresa {estado} exitosamente',
-            'activo': empresa.activo
-        }), 200
-
-    except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error toggling empresa {empresa_id}: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+    return jsonify({
+        'empresa_id': empresa.id,
+        'empresa':    empresa.nombre,
+        'rif':        empresa.rif,
+        'total_sucursales': len(sucursales),
+        'sucursales': [s.to_dict() for s in sucursales]
+    }), 200

@@ -1,15 +1,21 @@
-
 import os
 from flask import Blueprint, request, jsonify, current_app
+from flask_jwt_extended import jwt_required
 from models import db, Persona
 from services.facial_service import FacialService
 from utils.helpers import guardar_imagen
+from routes.auth import get_contexto_actual
 
 personas_bp = Blueprint('personas', __name__)
 
 
 @personas_bp.route('/registrar', methods=['POST'])
+@jwt_required()
 def registrar_persona():
+    ctx         = get_contexto_actual()
+    empresa_id  = ctx['empresa_id']
+    sucursal_id = ctx['sucursal_id']
+
     cedula = request.form.get('cedula', '').strip()
     nombre = request.form.get('nombre', '').strip()
 
@@ -28,8 +34,9 @@ def registrar_persona():
     if archivo.filename == '':
         return jsonify({'error': 'No se selecciono ningun archivo'}), 400
 
-    if Persona.query.filter_by(cedula=cedula).first():
-        return jsonify({'error': f"La cedula '{cedula}' ya esta registrada"}), 409
+    # Unicidad por cédula dentro de la empresa (nuevo constraint)
+    if Persona.query.filter_by(cedula=cedula, empresa_id=empresa_id).first():
+        return jsonify({'error': f"La cedula '{cedula}' ya esta registrada en la empresa"}), 409
 
     carpeta = current_app.config['UPLOAD_FOLDER_REGISTROS']
     try:
@@ -54,7 +61,13 @@ def registrar_persona():
                      'Asegurese de que la foto sea clara y el rostro este visible.'
         }), 422
 
-    persona = Persona(cedula=cedula, nombre=nombre, imagen_path=nombre_archivo)
+    persona = Persona(
+        cedula=cedula,
+        nombre=nombre,
+        imagen_path=nombre_archivo,
+        empresa_id=empresa_id,
+        sucursal_id_registro=sucursal_id    # ← solo referencial, dónde fue registrada
+    )
     persona.set_encoding(encoding)
 
     db.session.add(persona)
@@ -68,14 +81,24 @@ def registrar_persona():
 
 
 @personas_bp.route('/personas', methods=['GET'])
+@jwt_required()
 def listar_personas():
-    solo_activos = request.args.get('activo', 'true').lower() != 'false'
-    busqueda = request.args.get('q', '').strip()
+    ctx        = get_contexto_actual()
+    empresa_id = ctx['empresa_id']
 
-    query = Persona.query
+    solo_activos  = request.args.get('activo', 'true').lower() != 'false'
+    busqueda      = request.args.get('q', '').strip()
+    sucursal_filtro = request.args.get('sucursal_id', None)  # opcional para admins
+
+    # Base: siempre filtrado por empresa
+    query = Persona.query.filter_by(empresa_id=empresa_id)
 
     if solo_activos:
         query = query.filter_by(activo=True)
+
+    # Admin puede filtrar por sucursal de registro, user ve toda la empresa
+    if sucursal_filtro and ctx['rol'] == 'admin_empresa':
+        query = query.filter_by(sucursal_registro_id=sucursal_filtro)
 
     if busqueda:
         patron = f'%{busqueda}%'
@@ -86,15 +109,108 @@ def listar_personas():
             )
         )
 
-    query = query.order_by(Persona.nombre.asc())
-    personas = query.all()
+    personas = query.order_by(Persona.nombre.asc()).all()
 
-    return jsonify({'personas': [p.to_dict() for p in personas], 'total': len(personas)}), 200
+    return jsonify({
+        'personas': [p.to_dict() for p in personas],
+        'total': len(personas)
+    }), 200
 
 
 @personas_bp.route('/personas/<cedula>', methods=['GET'])
+@jwt_required()
 def obtener_persona(cedula: str):
-    persona = Persona.query.filter_by(cedula=cedula).first()
+    ctx = get_contexto_actual()
+
+    # Buscar por empresa únicamente, la cédula es única por empresa
+    persona = Persona.query.filter_by(
+        cedula=cedula,
+        empresa_id=ctx['empresa_id']
+    ).first()
+
+    if not persona:
+        return jsonify({'error': f"No se encontro persona con cedula '{cedula}' en la empresa"}), 404
+
+    return jsonify({'persona': persona.to_dict()}), 200
+
+
+@personas_bp.route('/personas/<cedula>', methods=['PUT'])
+@jwt_required()
+def actualizar_persona(cedula: str):
+    ctx = get_contexto_actual()
+
+    persona = Persona.query.filter_by(
+        cedula=cedula,
+        empresa_id=ctx['empresa_id']
+    ).first()
+
     if not persona:
         return jsonify({'error': f"No se encontro persona con cedula '{cedula}'"}), 404
-    return jsonify({'persona': persona.to_dict()}), 200
+
+    # Actualizar nombre si viene en el form
+    nuevo_nombre = request.form.get('nombre', '').strip()
+    if nuevo_nombre:
+        persona.nombre = nuevo_nombre
+
+    # Actualizar imagen y encoding si viene nueva imagen
+    if 'imagen' in request.files and request.files['imagen'].filename != '':
+        archivo  = request.files['imagen']
+        carpeta  = current_app.config['UPLOAD_FOLDER_REGISTROS']
+
+        try:
+            nombre_archivo = guardar_imagen(archivo, carpeta, prefijo=f"reg_{cedula}")
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+        ruta_imagen = os.path.join(carpeta, nombre_archivo)
+        servicio    = FacialService(threshold=current_app.config['FACE_DISTANCE_THRESHOLD'])
+        servicio.preprocesar_imagen(ruta_imagen)
+
+        try:
+            encoding = servicio.extraer_encoding(ruta_imagen)
+        except ValueError as e:
+            os.remove(ruta_imagen)
+            return jsonify({'error': f'Error procesando imagen: {str(e)}'}), 422
+
+        if encoding is None:
+            os.remove(ruta_imagen)
+            return jsonify({'error': 'No se detecto ningun rostro en la imagen'}), 422
+
+        # Eliminar imagen anterior
+        if persona.imagen_path:
+            ruta_anterior = os.path.join(carpeta, persona.imagen_path)
+            if os.path.exists(ruta_anterior):
+                os.remove(ruta_anterior)
+
+        persona.imagen_path = nombre_archivo
+        persona.set_encoding(encoding)
+
+    db.session.commit()
+
+    return jsonify({
+        'actualizado': True,
+        'mensaje': f'{persona.nombre} actualizado exitosamente',
+        'persona': persona.to_dict()
+    }), 200
+
+
+@personas_bp.route('/personas/<cedula>', methods=['DELETE'])
+@jwt_required()
+def desactivar_persona(cedula: str):
+    ctx = get_contexto_actual()
+
+    persona = Persona.query.filter_by(
+        cedula=cedula,
+        empresa_id=ctx['empresa_id']
+    ).first()
+
+    if not persona:
+        return jsonify({'error': f"No se encontro persona con cedula '{cedula}'"}), 404
+
+    persona.activo = False
+    db.session.commit()
+
+    return jsonify({
+        'desactivado': True,
+        'mensaje': f'{persona.nombre} desactivado exitosamente'
+    }), 200

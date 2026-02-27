@@ -1,268 +1,190 @@
-import jwt
-from datetime import datetime, timedelta
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity, create_access_token
 from functools import wraps
-from flask import Blueprint, request, jsonify, current_app
-from models import db, Usuario, TokenBlacklist
+from models import db, Usuario, Sucursal, TokenBlacklist
 
-auth_bp = Blueprint('auth', __name__, url_prefix='/auth')
-ROLES_VALIDOS = {'user', 'admin'}
+auth_bp = Blueprint('auth', __name__)
 
-# Configuración JWT
-SECRET_KEY = '959266dcefbf456d6f0e2f427500e693577a22dc4f0b7a0ed372bcb673a73431'  # En producción, usa variable de entorno
-ALGORITHM = 'HS256'
-TOKEN_EXPIRATION = 24  # horas
 
-def obtener_datos_request():
-    """Función helper para obtener datos de JSON o form-data"""
-    if request.is_json:
-        return request.get_json()
-    else:
-        return request.form.to_dict()
-
-def generar_token(usuario_id, username, rol):
-    """Genera un token JWT para el usuario"""
-    payload = {
-        'usuario_id': usuario_id,
-        'username': username,
-        'rol': rol,
-        'exp': datetime.utcnow() + timedelta(hours=TOKEN_EXPIRATION),
-        'iat': datetime.utcnow()
+# ─────────────────────────────────────────────
+# HELPER — contexto del token
+# ─────────────────────────────────────────────
+def get_contexto_actual():
+    claims = get_jwt()
+    return {
+        'usuario_id': int(get_jwt_identity()),
+        'empresa_id': claims['empresa_id'],
+        'sucursal_id': claims['sucursal_id'],
+        'rol': claims['rol'],
+        'username': claims['username'],
     }
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-def token_requerido(f):
-    """Decorador para proteger rutas que requieren autenticación"""
+
+# ─────────────────────────────────────────────
+# DECORATOR — reemplaza login_required
+# ─────────────────────────────────────────────
+def login_required(f):
     @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-
-        # Buscar token en headers
-        if 'Authorization' in request.headers:
-            auth_header = request.headers['Authorization']
-            if auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
-
-        if not token:
-            return jsonify({'error': 'Token de autenticación requerido'}), 401
-
-        try:
-            # Verificar si el token está en blacklist
-            token_bloqueado = TokenBlacklist.query.filter_by(token=token).first()
-            if token_bloqueado:
-                return jsonify({'error': 'Token inválido o expirado'}), 401
-
-            # Decodificar token
-            payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-            request.usuario_id = payload['usuario_id']
-            request.username = payload['username']
-            request.rol = payload['rol']
-
-        except jwt.ExpiredSignatureError:
-            return jsonify({'error': 'Token expirado'}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({'error': 'Token inválido'}), 401
-
+    @jwt_required()
+    def wrapper(*args, **kwargs):
         return f(*args, **kwargs)
-    return decorated
+    return wrapper
 
-def admin_requerido(f):
-    """Decorador para rutas que requieren rol de admin"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if request.rol != 'admin':
-            return jsonify({'error': 'Se requieren permisos de administrador'}), 403
-        return f(*args, **kwargs)
-    return decorated
 
-@auth_bp.route('/registro', methods=['POST'])
-def registro():
-    data = obtener_datos_request()
-    if not data:
-        return jsonify({'error': 'Se requieren datos'}), 400
+def rol_requerido(*roles):
+    def decorator(f):
+        @wraps(f)
+        @jwt_required()
+        def wrapper(*args, **kwargs):
+            if get_jwt().get('rol') not in roles:
+                return jsonify({'error': 'No tienes permisos para esta acción'}), 403
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
 
-    username = data.get('username', '').strip().upper()  # 🔥 Convertir a mayúsculas
-    password = data.get('password', '').strip()
-    rol = data.get('rol', 'user').strip().lower()
 
-    # Validaciones
-    errores = {}
-    if not username:
-        errores['username'] = 'El username es requerido'
-    elif len(username) < 3:
-        errores['username'] = 'El username debe tener al menos 3 caracteres'
-
-    if not password:
-        errores['password'] = 'La contraseña es requerida'
-    elif len(password) < 6:
-        errores['password'] = 'La contraseña debe tener al menos 6 caracteres'
-
-    if rol not in ROLES_VALIDOS:
-        errores['rol'] = f"El rol debe ser 'user' o 'admin'"
-
-    if errores:
-        return jsonify({'error': 'Datos inválidos', 'detalles': errores}), 400
-
-    # Verificar que el username no exista (búsqueda case-insensitive)
-    if Usuario.query.filter(Usuario.username.ilike(username)).first():  # 🔥 Buscar sin importar mayúsculas/minúsculas
-        return jsonify({'error': f"El username '{username}' ya está en uso"}), 409
-
-    usuario = Usuario(username=username, rol=rol)
-    usuario.set_password(password)
-
-    db.session.add(usuario)
-    db.session.commit()
-
-    return jsonify({
-        'success': True,
-        'mensaje': f"Usuario '{username}' registrado exitosamente",
-        'usuario': usuario.to_dict()
-    }), 201
-
+# ─────────────────────────────────────────────
+# PASO 1 — Validar credenciales
+# ─────────────────────────────────────────────
 @auth_bp.route('/login', methods=['POST'])
 def login():
-    data = obtener_datos_request()
+    data = request.get_json()
     if not data:
-        return jsonify({'error': 'Se requieren datos'}), 400
-
-    username = data.get('username', '').strip().upper()  
-    password = data.get('password', '').strip()
-
-    if not username or not password:
-        return jsonify({'error': 'Username y contraseña son requeridos'}), 400
-
-    # Buscar usuario con case-insensitive
-    usuario = Usuario.query.filter(Usuario.username.ilike(username), Usuario.activo == True).first()
-
-    if not usuario or not usuario.check_password(password):
-        return jsonify({'error': 'Credenciales inválidas'}), 401
-
-    # Generar token
-    token = generar_token(usuario.id, usuario.username, usuario.rol)
-
-    return jsonify({
-        'success': True,
-        'mensaje': f'Bienvenido, {usuario.username}',
-        'token': token,
-        'usuario': usuario.to_dict()
-    }), 200
-    data = obtener_datos_request()
-    if not data:
-        return jsonify({'error': 'Se requieren datos'}), 400
+        return jsonify({'error': 'Se requiere JSON en el body'}), 400
 
     username = data.get('username', '').strip()
-    password = data.get('password', '').strip()
+    password = data.get('password', '')
 
     if not username or not password:
-        return jsonify({'error': 'Username y contraseña son requeridos'}), 400
+        return jsonify({'error': 'username y password son requeridos'}), 400
 
     usuario = Usuario.query.filter_by(username=username, activo=True).first()
-
     if not usuario or not usuario.check_password(password):
         return jsonify({'error': 'Credenciales inválidas'}), 401
 
-    # Generar token
-    token = generar_token(usuario.id, usuario.username, usuario.rol)
+    sucursales = Sucursal.query.filter_by(
+        empresa_id=usuario.empresa_id,
+        activo=True
+    ).all()
 
     return jsonify({
-        'success': True,
-        'mensaje': f'Bienvenido, {usuario.username}',
-        'token': token,
-        'usuario': usuario.to_dict()
+        'mensaje': 'Credenciales válidas, seleccione una sucursal',
+        'usuario': usuario.to_dict(),
+        'sucursales': [s.to_dict() for s in sucursales]
     }), 200
 
-@auth_bp.route('/logout', methods=['POST'])
-@token_requerido
-def logout():
-    """
-    Cierra la sesión del usuario agregando su token a la blacklist
-    """
-    token = request.headers['Authorization'].split(' ')[1]
 
-    # Agregar token a blacklist
-    token_bloqueado = TokenBlacklist(token=token)
-    db.session.add(token_bloqueado)
-    db.session.commit()
+# ─────────────────────────────────────────────
+# PASO 2 — Seleccionar sucursal y obtener token
+# ─────────────────────────────────────────────
+@auth_bp.route('/seleccionar-sucursal', methods=['POST'])
+def seleccionar_sucursal():
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Se requiere JSON en el body'}), 400
 
-    return jsonify({
-        'success': True,
-        'mensaje': 'Sesión cerrada exitosamente'
-    }), 200
+    usuario_id   = data.get('usuario_id')
+    sucursal_id  = data.get('sucursal_id')
+    password     = data.get('password', '')
 
-@auth_bp.route('/perfil', methods=['GET'])
-@token_requerido
-def perfil():
-    """Obtiene información del usuario autenticado"""
-    usuario = Usuario.query.get(request.usuario_id)
-    if not usuario:
-        return jsonify({'error': 'Usuario no encontrado'}), 404
+    if not all([usuario_id, sucursal_id, password]):
+        return jsonify({'error': 'usuario_id, sucursal_id y password son requeridos'}), 400
 
-    return jsonify({
-        'success': True,
-        'usuario': usuario.to_dict()
-    }), 200
+    usuario = Usuario.query.filter_by(id=usuario_id, activo=True).first()
+    if not usuario or not usuario.check_password(password):
+        return jsonify({'error': 'No autorizado'}), 401
 
-@auth_bp.route('/usuarios', methods=['GET'])
-@token_requerido
-@admin_requerido
-def listar_usuarios():
-    """Lista todos los usuarios (solo admin)"""
-    usuarios = Usuario.query.filter_by(activo=True).all()
-    return jsonify({
-        'usuarios': [u.to_dict() for u in usuarios],
-        'total': len(usuarios)
-    }), 200
+    sucursal = Sucursal.query.filter_by(
+        id=sucursal_id,
+        empresa_id=usuario.empresa_id,
+        activo=True
+    ).first()
+    if not sucursal:
+        return jsonify({'error': 'Sucursal no válida para esta empresa'}), 403
 
-@auth_bp.route('/usuarios/<int:id>', methods=['DELETE'])
-@token_requerido
-@admin_requerido
-def desactivar_usuario(id):
-    """Desactiva un usuario (solo admin)"""
-    usuario = Usuario.query.get(id)
-    if not usuario:
-        return jsonify({'error': 'Usuario no encontrado'}), 404
-
-    usuario.activo = False
-    db.session.commit()
-
-    return jsonify({
-        'success': True,
-        'mensaje': f"Usuario '{usuario.username}' desactivado"
-    }), 200
-
-@auth_bp.route('/usuarios/<int:id>/rol', methods=['PATCH'])
-@token_requerido
-@admin_requerido
-def cambiar_rol(id):
-    """Cambia el rol de un usuario (solo admin)"""
-    usuario = Usuario.query.get(id)
-    if not usuario:
-        return jsonify({'error': 'Usuario no encontrado'}), 404
-
-    data = obtener_datos_request()
-    nuevo_rol = data.get('rol', '').strip().lower()
-
-    if nuevo_rol not in ROLES_VALIDOS:
-        return jsonify({'error': "El rol debe ser 'user' o 'admin'"}), 400
-
-    usuario.rol = nuevo_rol
-    db.session.commit()
-
-    return jsonify({
-        'success': True,
-        'mensaje': f"Rol actualizado a '{nuevo_rol}'",
-        'usuario': usuario.to_dict()
-    }), 200
-
-@auth_bp.route('/verificar-token', methods=['GET'])
-@token_requerido
-def verificar_token():
-    """Verifica si el token es válido"""
-    return jsonify({
-        'success': True,
-        'mensaje': 'Token válido',
-        'usuario': {
-            'id': request.usuario_id,
-            'username': request.username,
-            'rol': request.rol
+    access_token = create_access_token(
+        identity=str(usuario.id),
+        additional_claims={
+            'empresa_id': usuario.empresa_id,
+            'sucursal_id': sucursal_id,
+            'rol': usuario.rol,
+            'username': usuario.username,
         }
+    )
+
+    return jsonify({
+        'access_token': access_token,
+        'usuario': usuario.to_dict(),
+        'sucursal': sucursal.to_dict()
+    }), 200
+
+
+# ─────────────────────────────────────────────
+# LOGOUT — invalida el token
+# ─────────────────────────────────────────────
+@auth_bp.route('/logout', methods=['POST'])
+@jwt_required()
+def logout():
+    jti = get_jwt()['jti']
+    db.session.add(TokenBlacklist(jti=jti))
+    db.session.commit()
+    return jsonify({'mensaje': 'Sesión cerrada correctamente'}), 200
+
+
+# ─────────────────────────────────────────────
+# ME — info del usuario activo
+# ─────────────────────────────────────────────
+@auth_bp.route('/me', methods=['GET'])
+@jwt_required()
+def me():
+    ctx = get_contexto_actual()
+    usuario = Usuario.query.get(ctx['usuario_id'])
+    if not usuario:
+        return jsonify({'error': 'Usuario no encontrado'}), 404
+
+    sucursal = Sucursal.query.get(ctx['sucursal_id'])
+    return jsonify({
+        'usuario': usuario.to_dict(),
+        'sucursal_activa': sucursal.to_dict() if sucursal else None,
+    }), 200
+
+
+# ─────────────────────────────────────────────
+# CAMBIAR SUCURSAL — nuevo token, misma sesión
+# ─────────────────────────────────────────────
+@auth_bp.route('/cambiar-sucursal', methods=['POST'])
+@jwt_required()
+def cambiar_sucursal():
+    ctx = get_contexto_actual()
+    data = request.get_json()
+    nueva_sucursal_id = data.get('sucursal_id')
+
+    if not nueva_sucursal_id:
+        return jsonify({'error': 'sucursal_id es requerido'}), 400
+
+    sucursal = Sucursal.query.filter_by(
+        id=nueva_sucursal_id,
+        empresa_id=ctx['empresa_id'],
+        activo=True
+    ).first()
+    if not sucursal:
+        return jsonify({'error': 'Sucursal no válida para esta empresa'}), 403
+
+    # Invalida token actual
+    db.session.add(TokenBlacklist(jti=get_jwt()['jti']))
+    db.session.commit()
+
+    nuevo_token = create_access_token(
+        identity=str(ctx['usuario_id']),
+        additional_claims={
+            'empresa_id': ctx['empresa_id'],
+            'sucursal_id': nueva_sucursal_id,
+            'rol': ctx['rol'],
+            'username': ctx['username'],
+        }
+    )
+
+    return jsonify({
+        'access_token': nuevo_token,
+        'sucursal_activa': sucursal.to_dict()
     }), 200
