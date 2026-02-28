@@ -21,7 +21,7 @@ def get_contexto_actual():
 
 
 # ─────────────────────────────────────────────
-# DECORATOR — reemplaza login_required
+# DECORATORS
 # ─────────────────────────────────────────────
 def login_required(f):
     @wraps(f)
@@ -44,7 +44,7 @@ def rol_requerido(*roles):
 
 
 # ─────────────────────────────────────────────
-# PASO 1 — Validar credenciales
+# LOGIN — un solo paso con empresa y sucursal
 # ─────────────────────────────────────────────
 @auth_bp.route('/login', methods=['POST'])
 def login():
@@ -52,53 +52,29 @@ def login():
     if not data:
         return jsonify({'error': 'Se requiere JSON en el body'}), 400
 
-    username = data.get('username', '').strip()
-    password = data.get('password', '')
+    username    = data.get('username', '').strip()
+    password    = data.get('password', '')
+    empresa_id  = data.get('empresa_id')
+    sucursal_id = data.get('sucursal_id')
 
-    if not username or not password:
-        return jsonify({'error': 'username y password son requeridos'}), 400
+    if not all([username, password, empresa_id, sucursal_id]):
+        return jsonify({'error': 'username, password, empresa_id y sucursal_id son requeridos'}), 400
 
-    usuario = Usuario.query.filter_by(username=username, activo=True).first()
+    usuario = Usuario.query.filter_by(
+        username=username,
+        empresa_id=empresa_id,
+        activo=True
+    ).first()
+
     if not usuario or not usuario.check_password(password):
         return jsonify({'error': 'Credenciales inválidas'}), 401
 
-    sucursales = Sucursal.query.filter_by(
-        empresa_id=usuario.empresa_id,
-        activo=True
-    ).all()
-
-    return jsonify({
-        'mensaje': 'Credenciales válidas, seleccione una sucursal',
-        'usuario': usuario.to_dict(),
-        'sucursales': [s.to_dict() for s in sucursales]
-    }), 200
-
-
-# ─────────────────────────────────────────────
-# PASO 2 — Seleccionar sucursal y obtener token
-# ─────────────────────────────────────────────
-@auth_bp.route('/seleccionar-sucursal', methods=['POST'])
-def seleccionar_sucursal():
-    data = request.get_json()
-    if not data:
-        return jsonify({'error': 'Se requiere JSON en el body'}), 400
-
-    usuario_id   = data.get('usuario_id')
-    sucursal_id  = data.get('sucursal_id')
-    password     = data.get('password', '')
-
-    if not all([usuario_id, sucursal_id, password]):
-        return jsonify({'error': 'usuario_id, sucursal_id y password son requeridos'}), 400
-
-    usuario = Usuario.query.filter_by(id=usuario_id, activo=True).first()
-    if not usuario or not usuario.check_password(password):
-        return jsonify({'error': 'No autorizado'}), 401
-
     sucursal = Sucursal.query.filter_by(
         id=sucursal_id,
-        empresa_id=usuario.empresa_id,
+        empresa_id=empresa_id,
         activo=True
     ).first()
+
     if not sucursal:
         return jsonify({'error': 'Sucursal no válida para esta empresa'}), 403
 
@@ -170,7 +146,6 @@ def cambiar_sucursal():
     if not sucursal:
         return jsonify({'error': 'Sucursal no válida para esta empresa'}), 403
 
-    # Invalida token actual
     db.session.add(TokenBlacklist(jti=get_jwt()['jti']))
     db.session.commit()
 

@@ -32,12 +32,12 @@ with app.app_context():
 
     # ── Admin de la empresa ───────────────────────────────────────────────
     admin = Usuario(
-        username="admin_demo",
+        username="admin",
         rol="admin_empresa",
         empresa_id=empresa.id,
         sucursal_id=sucursal.id
     )
-    admin.set_password("admin1234")
+    admin.set_password("admin")
     db.session.add(admin)
 
     # ── Usuario operativo ─────────────────────────────────────────────────

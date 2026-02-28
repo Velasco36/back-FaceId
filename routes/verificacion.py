@@ -30,15 +30,11 @@ def formatear_tiempo_restante(segundos):
 
 
 def verificar_registro_reciente(cedula, empresa_id, tiempo_minimo_minutos=TIEMPO_MINIMO_ENTRE_REGISTROS):
-    """
-    Verifica registro reciente a nivel de EMPRESA (no de sucursal).
-    Evita doble registro aunque el usuario esté en otra sede.
-    """
     tiempo_limite = get_venezuela_time() - timedelta(minutes=tiempo_minimo_minutos)
 
     ultimo_movimiento = Movimiento.query.filter_by(
         cedula=cedula,
-        empresa_id=empresa_id        # ← antes filtraba por sucursal, ahora por empresa
+        empresa_id=empresa_id
     ).order_by(Movimiento.fecha_hora.desc()).first()
 
     if ultimo_movimiento and ultimo_movimiento.fecha_hora > tiempo_limite:
@@ -100,7 +96,6 @@ def verificar_identidad():
                 'error': 'No se detecto ningun rostro en la imagen proporcionada.'
             }), 422
 
-        # ── Buscar personas a nivel de EMPRESA completa ───────────────────
         personas = Persona.query.filter_by(
             empresa_id=empresa_id,
             activo=True
@@ -127,10 +122,8 @@ def verificar_identidad():
                 'personas_comparadas': len(personas_encodings)
             }), 200
 
-        # ── Coincidencia encontrada ───────────────────────────────────────
         persona_encontrada = resultado['persona']
 
-        # Verificar registro reciente a nivel de empresa
         tiene_reciente, ultimo_mov, tiempo_restante = verificar_registro_reciente(
             persona_encontrada.cedula,
             empresa_id
@@ -140,7 +133,7 @@ def verificar_identidad():
             segundos_transcurridos = (get_venezuela_time() - ultimo_mov.fecha_hora).total_seconds()
             current_app.logger.warning(
                 f"[VERIFICAR] Bloqueado para {persona_encontrada.nombre}. "
-                f"Último registro hace {segundos_transcurridos:.1f}s en sucursal {ultimo_mov.sucursal_id}"
+                f"Último registro hace {segundos_transcurridos:.1f}s"
             )
             return jsonify({
                 'verificado':         True,
@@ -155,16 +148,14 @@ def verificar_identidad():
                 'ultimo_registro': {
                     'tipo':          ultimo_mov.tipo,
                     'fecha_hora':    ultimo_mov.fecha_hora.isoformat(),
-                    'sucursal_id':   ultimo_mov.sucursal_id,   # ← info de en qué sede fue
                     'hace_segundos': round(segundos_transcurridos, 1),
                     'hace_minutos':  round(segundos_transcurridos / 60, 1),
                     'hace_texto':    formatear_tiempo_restante(segundos_transcurridos)
                 },
-                'tiempo_restante':      tiempo_restante,
+                'tiempo_restante':       tiempo_restante,
                 'movimiento_registrado': None
             }), 200
 
-        # ── Determinar tipo por jornada abierta ───────────────────────────
         sesion_abierta = SesionJornada.query.filter_by(
             cedula=persona_encontrada.cedula,
             empresa_id=empresa_id,
@@ -178,7 +169,6 @@ def verificar_identidad():
             f"[VERIFICAR] Registrando {tipo_movimiento} para {persona_encontrada.nombre} a las {hora_vzla}"
         )
 
-        # Crear movimiento
         movimiento = Movimiento(
             cedula=persona_encontrada.cedula,
             persona_id=persona_encontrada.id,
@@ -187,13 +177,12 @@ def verificar_identidad():
             fecha_hora=hora_vzla,
             confianza_verificacion=resultado['confianza'],
             empresa_id=empresa_id,
-            sucursal_id=sucursal_id,   # ← sucursal donde está el lector/cámara
+            sucursal_id=sucursal_id,
             usuario_id=usuario_id,
         )
         db.session.add(movimiento)
         db.session.flush()
 
-        # ── Actualizar SesionJornada ──────────────────────────────────────
         if tipo_movimiento == 'entrada':
             nueva_sesion = SesionJornada(
                 cedula=persona_encontrada.cedula,
@@ -227,10 +216,9 @@ def verificar_identidad():
             'distancia':           resultado['distancia'],
             'personas_comparadas': len(personas_encodings),
             'movimiento_registrado': {
-                'id':          movimiento.id,
-                'tipo':        tipo_movimiento,
-                'sucursal_id': sucursal_id,
-                'fecha_hora':  movimiento.fecha_hora.isoformat(),
+                'id':        movimiento.id,
+                'tipo':      tipo_movimiento,
+                'fecha_hora': movimiento.fecha_hora.isoformat(),
             }
         }), 200
 
@@ -238,7 +226,6 @@ def verificar_identidad():
         current_app.logger.error(f"[VERIFICAR] Error:\n{traceback.format_exc()}")
         _eliminar_archivo(ruta_imagen)
         return jsonify({'error': f'Error interno durante verificacion: {str(e)}'}), 500
-
 
 # ─────────────────────────────────────────────
 # ESTADO DE REGISTRO
@@ -249,7 +236,6 @@ def consultar_estado_registro(cedula):
     ctx        = get_contexto_actual()
     empresa_id = ctx['empresa_id']
 
-    # Buscar persona a nivel de empresa
     persona = Persona.query.filter_by(
         cedula=cedula,
         empresa_id=empresa_id,
@@ -263,7 +249,6 @@ def consultar_estado_registro(cedula):
         cedula, empresa_id
     )
 
-    # Estado de jornada
     sesion_abierta = SesionJornada.query.filter_by(
         cedula=cedula,
         empresa_id=empresa_id,
@@ -295,15 +280,15 @@ def consultar_estado_registro(cedula):
         }), 200
 
     return jsonify({
-        'puede_registrarse': True,
-        'mensaje':           f'Puede registrar: {proximo_tipo}',
-        'proximo_tipo':      proximo_tipo,   # ← Flutter puede mostrar qué va a registrar
+        'puede_registrarse':  True,
+        'mensaje':            f'Puede registrar: {proximo_tipo}',
+        'proximo_tipo':       proximo_tipo,
         'persona': {
             'id':     persona.id,
             'nombre': persona.nombre,
             'cedula': persona.cedula
         },
-        'jornada_activa':   sesion_abierta.to_dict() if sesion_abierta else None,
+        'jornada_activa':    sesion_abierta.to_dict() if sesion_abierta else None,
         'ultimo_movimiento': ultimo_mov.to_dict() if ultimo_mov else None
     }), 200
 

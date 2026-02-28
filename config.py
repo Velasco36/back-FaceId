@@ -32,8 +32,8 @@ class Config:
 
     # JWT
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'fallback-jwt-key')
-    JWT_ACCESS_TOKEN_EXPIRES = 2592000
-    JWT_REFRESH_TOKEN_EXPIRES = 2592000
+    JWT_ACCESS_TOKEN_EXPIRES = False  # ← nunca expira
+    JWT_REFRESH_TOKEN_EXPIRES = False  # ← nunca expira
     JWT_TOKEN_LOCATION = 'headers'
     JWT_HEADER_NAME = 'Authorization'
     JWT_HEADER_TYPE = 'Bearer'

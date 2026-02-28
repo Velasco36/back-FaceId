@@ -34,7 +34,6 @@ def registrar_persona():
     if archivo.filename == '':
         return jsonify({'error': 'No se selecciono ningun archivo'}), 400
 
-    # Unicidad por cédula dentro de la empresa (nuevo constraint)
     if Persona.query.filter_by(cedula=cedula, empresa_id=empresa_id).first():
         return jsonify({'error': f"La cedula '{cedula}' ya esta registrada en la empresa"}), 409
 
@@ -66,7 +65,7 @@ def registrar_persona():
         nombre=nombre,
         imagen_path=nombre_archivo,
         empresa_id=empresa_id,
-        sucursal_id_registro=sucursal_id    # ← solo referencial, dónde fue registrada
+        sucursal_registro_id=sucursal_id
     )
     persona.set_encoding(encoding)
 
@@ -86,17 +85,15 @@ def listar_personas():
     ctx        = get_contexto_actual()
     empresa_id = ctx['empresa_id']
 
-    solo_activos  = request.args.get('activo', 'true').lower() != 'false'
-    busqueda      = request.args.get('q', '').strip()
-    sucursal_filtro = request.args.get('sucursal_id', None)  # opcional para admins
+    solo_activos    = request.args.get('activo', 'true').lower() != 'false'
+    busqueda        = request.args.get('q', '').strip()
+    sucursal_filtro = request.args.get('sucursal_id', None)
 
-    # Base: siempre filtrado por empresa
     query = Persona.query.filter_by(empresa_id=empresa_id)
 
     if solo_activos:
         query = query.filter_by(activo=True)
 
-    # Admin puede filtrar por sucursal de registro, user ve toda la empresa
     if sucursal_filtro and ctx['rol'] == 'admin_empresa':
         query = query.filter_by(sucursal_registro_id=sucursal_filtro)
 
@@ -122,7 +119,6 @@ def listar_personas():
 def obtener_persona(cedula: str):
     ctx = get_contexto_actual()
 
-    # Buscar por empresa únicamente, la cédula es única por empresa
     persona = Persona.query.filter_by(
         cedula=cedula,
         empresa_id=ctx['empresa_id']
@@ -147,12 +143,10 @@ def actualizar_persona(cedula: str):
     if not persona:
         return jsonify({'error': f"No se encontro persona con cedula '{cedula}'"}), 404
 
-    # Actualizar nombre si viene en el form
     nuevo_nombre = request.form.get('nombre', '').strip()
     if nuevo_nombre:
         persona.nombre = nuevo_nombre
 
-    # Actualizar imagen y encoding si viene nueva imagen
     if 'imagen' in request.files and request.files['imagen'].filename != '':
         archivo  = request.files['imagen']
         carpeta  = current_app.config['UPLOAD_FOLDER_REGISTROS']
@@ -176,7 +170,6 @@ def actualizar_persona(cedula: str):
             os.remove(ruta_imagen)
             return jsonify({'error': 'No se detecto ningun rostro en la imagen'}), 422
 
-        # Eliminar imagen anterior
         if persona.imagen_path:
             ruta_anterior = os.path.join(carpeta, persona.imagen_path)
             if os.path.exists(ruta_anterior):
@@ -213,4 +206,27 @@ def desactivar_persona(cedula: str):
     return jsonify({
         'desactivado': True,
         'mensaje': f'{persona.nombre} desactivado exitosamente'
+    }), 200
+
+
+@personas_bp.route('/personas/<cedula>/activar', methods=['PATCH'])
+@jwt_required()
+def activar_persona(cedula: str):
+    ctx = get_contexto_actual()
+
+    persona = Persona.query.filter_by(
+        cedula=cedula,
+        empresa_id=ctx['empresa_id']
+    ).first()
+
+    if not persona:
+        return jsonify({'error': f"No se encontro persona con cedula '{cedula}'"}), 404
+
+    persona.activo = True
+    db.session.commit()
+
+    return jsonify({
+        'activado': True,
+        'mensaje': f'{persona.nombre} activado exitosamente',
+        'persona': persona.to_dict()
     }), 200
