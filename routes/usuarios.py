@@ -206,12 +206,12 @@ def eliminar_usuario(usuario_id):
 # ─────────────────────────────────────────────
 # TODOS LOS USUARIOS — solo super_admin
 # ─────────────────────────────────────────────
-@usuarios_bp.route('/todos-los-usuarios', methods=['GET'])
+@usuarios_bp.route('/all-users', methods=['GET'])
 @jwt_required()
 def ver_todos_usuarios():
     ctx = get_contexto_actual()
 
-    if ctx['rol'] != 'super_admin':
+    if ctx['rol'] != 'admin_empresa':
         return jsonify({'error': 'Acceso denegado'}), 403
 
     usuarios = Usuario.query.order_by(Usuario.empresa_id, Usuario.username).all()

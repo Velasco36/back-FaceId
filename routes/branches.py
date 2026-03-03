@@ -78,8 +78,8 @@ def crear_sucursal():
     sucursal = Sucursal(
         nombre=nombre,
         direccion=data.get('direccion'),
-        telefono=data.get('telefono'),
-        es_matriz=False,           # solo una matriz por empresa
+        telefono=0,
+        es_matriz=False,
         empresa_id=ctx['empresa_id']
     )
     db.session.add(sucursal)

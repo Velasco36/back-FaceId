@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required
-from models import db, Persona, Movimiento, SesionJornada
+from models import db, Persona, Movimiento, SesionJornada, Sucursal
 from routes.auth import get_contexto_actual
 from utils.helpers import paginar_query, parsear_fecha
 
@@ -24,7 +24,6 @@ def registrar_movimiento():
     observacion = request.form.get('observacion', '').strip() or None
     confianza   = request.form.get('confianza_verificacion', None)
 
-    # Validaciones
     errores = {}
     if not cedula:
         errores['cedula'] = 'La cedula es requerida'
@@ -35,7 +34,6 @@ def registrar_movimiento():
     if errores:
         return jsonify({'error': 'Datos invalidos', 'detalles': errores}), 400
 
-    # Buscar persona a nivel de empresa (no de sucursal)
     persona = Persona.query.filter_by(
         cedula=cedula,
         empresa_id=ctx['empresa_id'],
@@ -44,7 +42,6 @@ def registrar_movimiento():
     if not persona:
         return jsonify({'error': f"No se encontro persona activa con cedula '{cedula}' en la empresa"}), 404
 
-    # Crear movimiento con contexto del token
     movimiento = Movimiento(
         cedula=cedula,
         persona_id=persona.id,
@@ -53,17 +50,15 @@ def registrar_movimiento():
         fecha_hora=datetime.utcnow(),
         confianza_verificacion=float(confianza) if confianza else None,
         empresa_id=ctx['empresa_id'],
-        sucursal_id=ctx['sucursal_id'],   # ← sucursal donde opera el usuario
-        usuario_id=ctx['usuario_id'],      # ← quién registró
+        sucursal_id=ctx['sucursal_id'],
+        usuario_id=ctx['usuario_id'],
     )
     db.session.add(movimiento)
-    db.session.flush()  # obtenemos movimiento.id antes del commit
+    db.session.flush()
 
-    # ── Manejo SesionJornada ──────────────────────────────────────────────
     sesion_jornada = None
 
     if tipo == 'entrada':
-        # Si ya tiene una jornada abierta, cerrarla (caso borde: doble entrada)
         sesion_abierta = SesionJornada.query.filter_by(
             cedula=cedula,
             empresa_id=ctx['empresa_id'],
@@ -72,7 +67,6 @@ def registrar_movimiento():
         if sesion_abierta:
             sesion_abierta.abierta = False
 
-        # Abrir nueva jornada
         sesion_jornada = SesionJornada(
             cedula=cedula,
             persona_id=persona.id,
@@ -85,7 +79,6 @@ def registrar_movimiento():
         db.session.add(sesion_jornada)
 
     elif tipo == 'salida':
-        # Buscar jornada abierta en CUALQUIER sucursal de la empresa
         sesion_abierta = SesionJornada.query.filter_by(
             cedula=cedula,
             empresa_id=ctx['empresa_id'],
@@ -96,7 +89,6 @@ def registrar_movimiento():
             db.session.rollback()
             return jsonify({'error': 'No hay entrada activa para esta persona'}), 400
 
-        # Cerrar jornada — puede ser en sucursal distinta a la entrada
         sesion_abierta.movimiento_salida_id = movimiento.id
         sesion_abierta.sucursal_salida_id   = ctx['sucursal_id']
         sesion_abierta.fecha_salida         = movimiento.fecha_hora
@@ -114,7 +106,9 @@ def registrar_movimiento():
 
 
 # ─────────────────────────────────────────────
-# LISTAR MOVIMIENTOS — filtrados por empresa del token
+# LISTAR MOVIMIENTOS — paginado infinito
+# Orden: ascendente (el más reciente al final)
+# Parámetros: page, per_page (default 10), cedula, tipo, sucursal_id, fechas
 # ─────────────────────────────────────────────
 @movimientos_bp.route('/movimientos', methods=['GET'])
 @jwt_required()
@@ -123,19 +117,17 @@ def listar_movimientos():
 
     cedula           = request.args.get('cedula', '').strip() or None
     tipo             = request.args.get('tipo', '').strip().lower() or None
-    sucursal_id      = request.args.get('sucursal_id', None)  # opcional: filtrar por sucursal
+    sucursal_id      = request.args.get('sucursal_id', None)
     fecha_inicio_str = request.args.get('fecha_inicio', '').strip() or None
     fecha_fin_str    = request.args.get('fecha_fin', '').strip() or None
     page             = int(request.args.get('page', 1))
-    per_page         = int(request.args.get('per_page', current_app.config.get('ITEMS_PER_PAGE', 20)))
+    per_page         = int(request.args.get('per_page', 10))   # ← default 10
 
     if tipo and tipo not in TIPOS_VALIDOS:
         return jsonify({'error': f"Tipo invalido: '{tipo}'. Use 'entrada' o 'salida'"}), 400
 
-    # Siempre filtrado por empresa del token
     query = Movimiento.query.filter_by(empresa_id=ctx['empresa_id'])
 
-    # Admin ve toda la empresa, user solo ve su sucursal
     if ctx['rol'] != 'admin_empresa':
         query = query.filter_by(sucursal_id=ctx['sucursal_id'])
     elif sucursal_id:
@@ -159,6 +151,7 @@ def listar_movimientos():
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
 
+    # ✅ Ascendente: el más antiguo primero, el más reciente al final
     query = query.order_by(Movimiento.fecha_hora.desc())
 
     try:
@@ -169,12 +162,12 @@ def listar_movimientos():
     return jsonify({
         'movimientos': [m.to_dict() for m in paginacion['items']],
         'paginacion': {
-            'total':          paginacion['total'],
-            'paginas':        paginacion['paginas'],
-            'pagina_actual':  paginacion['pagina_actual'],
-            'por_pagina':     paginacion['por_pagina'],
-            'tiene_siguiente':paginacion['tiene_siguiente'],
-            'tiene_anterior': paginacion['tiene_anterior'],
+            'total':           paginacion['total'],
+            'paginas':         paginacion['paginas'],
+            'pagina_actual':   paginacion['pagina_actual'],
+            'por_pagina':      paginacion['por_pagina'],
+            'tiene_siguiente': paginacion['tiene_siguiente'],
+            'tiene_anterior':  paginacion['tiene_anterior'],
         },
         'filtros_aplicados': {
             'cedula':       cedula,
@@ -187,6 +180,25 @@ def listar_movimientos():
 
 
 # ─────────────────────────────────────────────
+# SUCURSALES — lista de sucursales de la empresa
+# ─────────────────────────────────────────────
+@movimientos_bp.route('/sucursales', methods=['GET'])
+@jwt_required()
+def listar_sucursales():
+    ctx = get_contexto_actual()
+
+    sucursales = Sucursal.query.filter_by(
+        empresa_id=ctx['empresa_id'],
+        activo=True
+    ).order_by(Sucursal.nombre.asc()).all()
+
+    return jsonify({
+        'sucursales': [s.to_dict() for s in sucursales],
+        'total': len(sucursales),
+    }), 200
+
+
+# ─────────────────────────────────────────────
 # RESUMEN — del día, por empresa/sucursal
 # ─────────────────────────────────────────────
 @movimientos_bp.route('/movimientos/resumen', methods=['GET'])
@@ -194,24 +206,21 @@ def listar_movimientos():
 def resumen_movimientos():
     ctx = get_contexto_actual()
 
-    hoy       = datetime.utcnow().date()
+    hoy        = datetime.utcnow().date()
     inicio_dia = datetime.combine(hoy, datetime.min.time())
     fin_dia    = datetime.combine(hoy, datetime.max.time())
 
-    # Base siempre filtrada por empresa
     base = Movimiento.query.filter(
         Movimiento.empresa_id == ctx['empresa_id'],
         Movimiento.fecha_hora.between(inicio_dia, fin_dia)
     )
 
-    # Admin ve toda la empresa, user solo su sucursal
     if ctx['rol'] != 'admin_empresa':
         base = base.filter(Movimiento.sucursal_id == ctx['sucursal_id'])
 
     entradas_hoy = base.filter(Movimiento.tipo == 'entrada').count()
     salidas_hoy  = base.filter(Movimiento.tipo == 'salida').count()
 
-    # Jornadas actualmente abiertas (personas dentro)
     jornadas_abiertas = SesionJornada.query.filter_by(
         empresa_id=ctx['empresa_id'],
         abierta=True
@@ -219,11 +228,10 @@ def resumen_movimientos():
 
     return jsonify({
         'fecha':              hoy.isoformat(),
-        'empresa_id':         ctx['empresa_id'],
         'sucursal_id':        ctx['sucursal_id'] if ctx['rol'] != 'admin_empresa' else 'todas',
         'total_entradas_hoy': entradas_hoy,
         'total_salidas_hoy':  salidas_hoy,
-        'personas_adentro':   jornadas_abiertas,  # ← nuevo: conteo real
+        'personas_adentro':   jornadas_abiertas,
         'balance_estimado':   entradas_hoy - salidas_hoy,
     }), 200
 
@@ -242,7 +250,6 @@ def movimientos_por_persona():
     if not cedula and not nombre:
         return jsonify({'error': 'Se requiere cedula o nombre'}), 400
 
-    # Buscar siempre dentro de la empresa del token
     base_query = Persona.query.filter_by(
         empresa_id=ctx['empresa_id'],
         activo=True
@@ -267,7 +274,7 @@ def movimientos_por_persona():
     movimientos = Movimiento.query.filter_by(
         cedula=persona.cedula,
         empresa_id=ctx['empresa_id']
-    ).order_by(Movimiento.fecha_hora.desc()).all()
+    ).order_by(Movimiento.fecha_hora.asc()).all()
 
     return jsonify({
         'persona': persona.to_dict(),

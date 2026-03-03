@@ -23,7 +23,7 @@ def create_app(config_class=Config):
     app.config['JWT_SECRET_KEY'] = os.environ.get(
         'JWT_SECRET_KEY', 'tu-clave-jwt-secreta-cambiar-en-produccion'
     )
-    app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=12)
+    app.config['JWT_ACCESS_TOKEN_EXPIRES'] = False
 
     # ── Extensiones ───────────────────────────────────────────────────────
     jwt = JWTManager(app)
